@@ -25,7 +25,7 @@
       box-shadow: 0 0 40px rgba(255,255,255,0.06);
     }
 
-    /* Overlay screens (start / game-over) */
+    /* Transient flash overlay (level-up, game-over fade) */
     #overlay {
       position: absolute;
       inset: 0;
@@ -36,36 +36,20 @@
       color: #fff;
       text-align: center;
       pointer-events: none;
+      /* All menu content is drawn on the canvas — this div is kept
+         only as a lightweight accessibility / SEO label layer. */
     }
-    #overlay h1 {
-      font-size: clamp(2rem, 6vw, 4.5rem);
-      letter-spacing: 0.3em;
-      text-shadow: 0 0 20px #fff, 0 0 60px rgba(255,255,255,0.4);
-      margin-bottom: 0.4em;
-    }
-    #overlay p {
-      font-size: clamp(0.75rem, 2vw, 1.1rem);
-      letter-spacing: 0.15em;
-      opacity: 0.75;
-      margin: 0.25em 0;
-    }
-    #overlay .blink {
-      animation: blink 1.1s step-end infinite;
-    }
-    @keyframes blink { 50% { opacity: 0; } }
     #overlay.hidden { display: none; }
+
+    /* Cursor: pointer when hovering canvas during menu */
+    #gameCanvas.menu-active { cursor: pointer; }
   </style>
 </head>
 <body>
 
 <canvas id="gameCanvas"></canvas>
 
-<div id="overlay">
-  <h1>ASTEROIDS</h1>
-  <p>CONTROLS: ←/→ or A/D — ROTATE</p>
-  <p>↑ or W — THRUST &nbsp;|&nbsp; SPACE — FIRE</p>
-  <p style="margin-top:1.2em;" class="blink">PRESS SPACE OR ENTER TO START</p>
-</div>
+<div id="overlay" class="hidden" aria-live="polite"></div>
 
 <script>
 /* ================================================================
@@ -91,21 +75,45 @@ const SHIP_TURN_SPEED    = 0.065;     // radians per frame
 const BULLET_SPEED       = 7;
 const BULLET_MAX_DIST    = 640;       // pixels before bullet expires
 const INVINCIBILITY_TIME = 180;       // frames of post-spawn immunity
-const FLASH_INTERVAL     = 6;        // frames between blink during immunity
+const FLASH_INTERVAL     = 6;         // frames between blink during immunity
 
 const ASTEROID_SIZES     = { large: 48, medium: 24, small: 12 };
 const ASTEROID_SCORE     = { large: 20, medium: 50, small: 100 };
-const ASTEROID_SPEED     = { large: 1.2, medium: 1.8, small: 2.6 };
-const INITIAL_ASTEROIDS  = 4;
-const LIVES_START        = 3;
+// Base speeds — multiplied by the active difficulty's speedMult
+const ASTEROID_BASE_SPEED = { large: 1.2, medium: 1.8, small: 2.6 };
 const EXTRA_LIFE_SCORE   = 10000;
+
+/**
+ * DIFFICULTY_CONFIG — drives the three selectable presets.
+ * speedMult scales all asteroid base velocities.
+ */
+const DIFFICULTY_CONFIG = {
+  easy:   { label: 'FACIL',  key: '1', asteroids: 3, lives: 5, speedMult: 0.5  },
+  normal: { label: 'NORMAL', key: '2', asteroids: 5, lives: 3, speedMult: 1.0  },
+  hard:   { label: 'DIFICIL',key: '3', asteroids: 8, lives: 1, speedMult: 1.5  },
+};
+const DIFFICULTY_KEYS = ['easy', 'normal', 'hard']; // ordered list for rendering
+
+// Active difficulty values — populated by selectDifficulty()
+let activeDifficulty = 'normal';
+let ASTEROID_SPEED   = { ...ASTEROID_BASE_SPEED };
+let INITIAL_ASTEROIDS;
+let LIVES_START;
 
 // ── Game state ───────────────────────────────────────────────────
 let ship, bullets, asteroids;
 let score, highScore, lives, level;
 let invincibleFrames, extraLifeThreshold;
-let gameState;         // 'idle' | 'playing' | 'dead' | 'gameover'
+/**
+ * gameState — simple finite state machine:
+ *   'menu'    : difficulty selection screen
+ *   'playing' : active gameplay
+ *   'dead'    : ship just died, counting down before respawn / game-over
+ *   'gameover': brief pause before returning to menu
+ */
+let gameState;
 let deathTimer;
+let menuHoverIndex = -1;   // which difficulty option the mouse is over
 let keys;
 let frameCount;
 
@@ -309,6 +317,7 @@ function createAsteroid(x, y, type = 'large') {
     shape.push({ angle, r: r * jag });
   }
 
+  // Speed is scaled by the active difficulty multiplier
   const speed = ASTEROID_SPEED[type];
   const angle = rand(0, Math.PI * 2);
 
@@ -540,6 +549,24 @@ function drawMiniShip(x, y) {
 
 // ── Game State Management ────────────────────────────────────────
 
+/**
+ * selectDifficulty — apply a difficulty preset and start the game.
+ * Updates the global speed/lives/asteroid-count variables, then kicks off.
+ * @param {string} key - one of 'easy' | 'normal' | 'hard'
+ */
+function selectDifficulty(key) {
+  activeDifficulty  = key;
+  const cfg         = DIFFICULTY_CONFIG[key];
+  LIVES_START       = cfg.lives;
+  INITIAL_ASTEROIDS = cfg.asteroids;
+  // Rebuild speed table scaled by difficulty multiplier
+  for (const t of ['large', 'medium', 'small']) {
+    ASTEROID_SPEED[t] = ASTEROID_BASE_SPEED[t] * cfg.speedMult;
+  }
+  startGame();
+}
+
+/** startGame — reset all gameplay variables and enter 'playing'. */
 function startGame() {
   score              = 0;
   level              = 1;
@@ -551,7 +578,7 @@ function startGame() {
   invincibleFrames   = INVINCIBILITY_TIME;
   spawnAsteroids();
   gameState          = 'playing';
-  overlay.classList.add('hidden');
+  canvas.classList.remove('menu-active');
 }
 
 function nextLevel() {
@@ -564,16 +591,132 @@ function nextLevel() {
   gameState  = 'playing';
 }
 
+/**
+ * showGameOver — record the hi-score then return to the menu after a
+ * short pause so the player can see their score on the HUD.
+ */
 function showGameOver() {
   if (score > highScore) highScore = score;
-  gameState = 'gameover';
-  overlay.classList.remove('hidden');
-  overlay.innerHTML = `
-    <h1>GAME OVER</h1>
-    <p>SCORE &nbsp;&nbsp;${score}</p>
-    <p>HI-SCORE &nbsp;${highScore}</p>
-    <p style="margin-top:1.2em;" class="blink">PRESS SPACE OR ENTER TO PLAY AGAIN</p>
-  `;
+  gameState  = 'gameover';
+  deathTimer = 180; // ~3 s pause on the final HUD before returning to menu
+}
+
+/** showMenu — transition to the difficulty-selection screen. */
+function showMenu() {
+  gameState = 'menu';
+  canvas.classList.add('menu-active');
+}
+
+// ── Menu Rendering ───────────────────────────────────────────────
+
+/**
+ * buildMenuRects — compute the bounding boxes for the three difficulty
+ * buttons so hit-testing (mouse clicks) can reuse the same geometry.
+ * Returns an array of { x, y, w, h, key } objects.
+ */
+function buildMenuRects() {
+  const btnW = 220, btnH = 48, gap = 22;
+  const totalH = DIFFICULTY_KEYS.length * (btnH + gap) - gap;
+  const startY = H / 2 + 20;
+  return DIFFICULTY_KEYS.map((key, i) => ({
+    key,
+    x: W / 2 - btnW / 2,
+    y: startY + i * (btnH + gap),
+    w: btnW,
+    h: btnH,
+  }));
+}
+
+/**
+ * drawMenu — render the full difficulty-selection screen onto the canvas.
+ * Called each frame while gameState === 'menu'.
+ */
+function drawMenu() {
+  // ── Title ──
+  ctx.save();
+  ctx.shadowBlur  = 24;
+  ctx.shadowColor = '#fff';
+  ctx.fillStyle   = '#fff';
+  ctx.font        = "bold 64px 'Courier New', monospace";
+  ctx.textAlign   = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('ASTEROIDS', W / 2, H / 2 - 130);
+  ctx.restore();
+
+  // ── Sub-title ──
+  drawText('SELECIONE A DIFICULDADE', W / 2, H / 2 - 60, 14, 0.55);
+
+  // ── Difficulty buttons ──
+  const rects = buildMenuRects();
+  const colours = { easy: '#3f8', normal: '#ff0', hard: '#f44' };
+
+  rects.forEach((r, i) => {
+    const cfg      = DIFFICULTY_CONFIG[r.key];
+    const hovered  = menuHoverIndex === i;
+    const colour   = colours[r.key];
+
+    ctx.save();
+
+    // Button background (subtle highlight on hover)
+    ctx.globalAlpha = hovered ? 0.18 : 0.07;
+    ctx.fillStyle   = colour;
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 6);
+    ctx.fill();
+
+    // Button border
+    ctx.globalAlpha = hovered ? 1 : 0.6;
+    ctx.strokeStyle = colour;
+    ctx.lineWidth   = hovered ? 2 : 1.2;
+    ctx.shadowBlur  = hovered ? 16 : 4;
+    ctx.shadowColor = colour;
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 6);
+    ctx.stroke();
+
+    // Label  (e.g. "[1] FACIL")
+    ctx.globalAlpha  = 1;
+    ctx.fillStyle    = colour;
+    ctx.font         = `bold ${hovered ? 20 : 18}px 'Courier New', monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowBlur   = hovered ? 12 : 6;
+    ctx.fillText(`[${cfg.key}]  ${cfg.label}`, W / 2, r.y + r.h / 2);
+
+    ctx.restore();
+
+    // Sub-info (lives & asteroids)
+    const info = `${cfg.lives} vida${cfg.lives > 1 ? 's' : ''}  •  ${cfg.asteroids} asteroides`;
+    drawText(info, W / 2, r.y + r.h + 9, 10, 0.4);
+  });
+
+  // ── Hi-score at bottom ──
+  if (highScore > 0) {
+    drawText(`HI-SCORE  ${String(highScore).padStart(6, '0')}`, W / 2, H - 28, 13, 0.45);
+  }
+
+  // ── Controls reminder ──
+  drawText('← → ou A/D: ROTAR  |  ↑ ou W: EMPUXO  |  ESPACO: ATIRAR', W / 2, H - 12, 10, 0.3);
+}
+
+/**
+ * drawGameOverScreen — overlay on top of the frozen game field while
+ * deathTimer counts down before returning to the menu.
+ */
+function drawGameOverScreen() {
+  // Dim the field slightly
+  ctx.save();
+  ctx.fillStyle   = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  drawText('GAME OVER', W / 2, H / 2 - 40, 52);
+  drawText(`SCORE  ${score}`, W / 2, H / 2 + 18, 20, 0.8);
+  if (highScore > 0) drawText(`HI-SCORE  ${highScore}`, W / 2, H / 2 + 46, 16, 0.5);
+  // Blink hint
+  if (Math.floor(frameCount / 30) % 2 === 0) {
+    drawText('VOLTANDO AO MENU...', W / 2, H / 2 + 82, 13, 0.55);
+  }
 }
 
 // ── Input Handling ───────────────────────────────────────────────
@@ -585,13 +728,14 @@ const FIRE_RATE = 8; // frames between bullets
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
 
-  if (e.code === 'Space' || e.code === 'Enter') {
-    if (gameState === 'idle' || gameState === 'gameover') {
-      startGame();
-    }
+  // Numeric keys 1/2/3 select difficulty from the menu
+  if (gameState === 'menu') {
+    if (e.code === 'Digit1') selectDifficulty('easy');
+    if (e.code === 'Digit2') selectDifficulty('normal');
+    if (e.code === 'Digit3') selectDifficulty('hard');
   }
 
-  // Fire rate limiter
+  // Fire rate limiter (gameplay only)
   if (e.code === 'Space' && gameState === 'playing') {
     if (frameCount - lastFire >= FIRE_RATE) {
       fireBullet();
@@ -602,11 +746,46 @@ window.addEventListener('keydown', e => {
 
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
+// Mouse hover & click for the menu buttons
+canvas.addEventListener('mousemove', e => {
+  if (gameState !== 'menu') return;
+  const rect  = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top)  * scaleY;
+  const rects = buildMenuRects();
+  menuHoverIndex = rects.findIndex(r => mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h);
+});
+
+canvas.addEventListener('click', e => {
+  if (gameState !== 'menu') return;
+  const rect  = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top)  * scaleY;
+  const rects = buildMenuRects();
+  const hit   = rects.find(r => mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h);
+  if (hit) selectDifficulty(hit.key);
+});
+
+canvas.addEventListener('mouseleave', () => { menuHoverIndex = -1; });
+
 // ── Main Game Loop ───────────────────────────────────────────────
 
 /**
  * gameLoop — the central update/draw cycle, called at ~60 fps via requestAnimationFrame.
  * Phases: clear → update → draw → HUD → schedule next frame.
+ */
+/**
+ * gameLoop — central update/draw cycle (~60 fps via requestAnimationFrame).
+ *
+ * State dispatch:
+ *   'menu'     → draw difficulty selection screen
+ *   'playing'  → full gameplay (update + draw + HUD)
+ *   'dead'     → pause then respawn or showGameOver()
+ *   'gameover' → show result overlay then return to menu
  */
 function gameLoop() {
   frameCount++;
@@ -615,9 +794,17 @@ function gameLoop() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
 
+  // ── MENU state ──
+  if (gameState === 'menu') {
+    drawMenu();
+    requestAnimationFrame(gameLoop);
+    return;
+  }
+
+  // ── PLAYING / DEAD states ──
   if (gameState === 'playing' || gameState === 'dead') {
 
-    // ── Update ──
+    // Update phase
     if (gameState === 'playing') {
       updateShip();
       updateBullets();
@@ -631,22 +818,22 @@ function gameLoop() {
         lastFire = frameCount;
       }
 
-      // Level clear: all asteroids destroyed
+      // Level clear: all asteroids destroyed → advance level
       if (asteroids.length === 0) nextLevel();
     }
 
-    // Death countdown → respawn or game-over
+    // Death countdown → respawn or trigger game-over
     if (gameState === 'dead') {
       deathTimer--;
       if (deathTimer <= 0) {
-        if (lives > 0) respawnShip(), gameState = 'playing';
+        if (lives > 0) { respawnShip(); gameState = 'playing'; }
         else showGameOver();
       }
     }
 
     updateParticles();
 
-    // ── Draw ──
+    // Draw phase
     drawAsteroids();
     drawBullets();
     drawShip();
@@ -654,16 +841,28 @@ function gameLoop() {
     drawHUD();
   }
 
+  // ── GAME OVER state — show result then fade to menu ──
+  if (gameState === 'gameover') {
+    // Keep the frozen field visible as background
+    drawAsteroids();
+    drawParticles();
+    drawHUD();
+    drawGameOverScreen();
+    deathTimer--;
+    if (deathTimer <= 0) showMenu();
+  }
+
   requestAnimationFrame(gameLoop);
 }
 
 // ── Bootstrap ────────────────────────────────────────────────────
 
-highScore  = 0;
-frameCount = 0;
-gameState  = 'idle';
-overlay.classList.remove('hidden');
+highScore      = 0;
+frameCount     = 0;
+LIVES_START    = DIFFICULTY_CONFIG.normal.lives;      // safe defaults until
+INITIAL_ASTEROIDS = DIFFICULTY_CONFIG.normal.asteroids; // difficulty is chosen
 
+showMenu();
 requestAnimationFrame(gameLoop);
 
 </script>
