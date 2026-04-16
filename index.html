@@ -8,40 +8,37 @@
     /* ── Reset & base ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    body {
+    /* Fill the entire browser window — no scrollbars, no gaps */
+    html, body {
+      width: 100%;
+      height: 100%;
       background: #000;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      font-family: 'Courier New', monospace;
       overflow: hidden;
+      font-family: 'Courier New', monospace;
     }
 
+    /* Canvas stretches to cover the full viewport */
     #gameCanvas {
       display: block;
-      border: 1px solid rgba(255,255,255,0.15);
-      box-shadow: 0 0 40px rgba(255,255,255,0.06);
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
     }
 
-    /* Transient flash overlay (level-up, game-over fade) */
+    /* Accessibility overlay — content drawn on canvas, this is invisible */
     #overlay {
-      position: absolute;
+      position: fixed;
       inset: 0;
+      pointer-events: none;
       display: flex;
-      flex-direction: column;
       align-items: center;
       justify-content: center;
-      color: #fff;
-      text-align: center;
-      pointer-events: none;
-      /* All menu content is drawn on the canvas — this div is kept
-         only as a lightweight accessibility / SEO label layer. */
     }
     #overlay.hidden { display: none; }
 
-    /* Cursor: pointer when hovering canvas during menu */
+    /* Pointer cursor while navigating the difficulty menu */
     #gameCanvas.menu-active { cursor: pointer; }
   </style>
 </head>
@@ -62,9 +59,44 @@ const canvas  = document.getElementById('gameCanvas');
 const ctx     = canvas.getContext('2d');
 const overlay = document.getElementById('overlay');
 
-const W = 800, H = 600;
-canvas.width  = W;
-canvas.height = H;
+/**
+ * W, H — live canvas dimensions. Declared as `let` so resizeCanvas()
+ * can update them at any time; all game code reads these variables,
+ * so wrap, centering, and menu geometry all adapt automatically.
+ */
+let W = window.innerWidth;
+let H = window.innerHeight;
+
+/**
+ * resizeCanvas — synchronise canvas pixel dimensions with the
+ * current browser window size and update W/H globals.
+ * After a resize, any objects outside the new bounds are clamped
+ * to the opposite edge to prevent them spawning off-screen.
+ */
+function resizeCanvas() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = W;
+  canvas.height = H;
+
+  // Clamp existing objects into the new bounds so nothing gets stranded
+  if (typeof ship !== 'undefined' && ship) {
+    ship.x = wrap(ship.x, W);
+    ship.y = wrap(ship.y, H);
+  }
+  if (typeof bullets !== 'undefined') {
+    bullets.forEach(b => { b.x = wrap(b.x, W); b.y = wrap(b.y, H); });
+  }
+  if (typeof asteroids !== 'undefined') {
+    asteroids.forEach(a => { a.x = wrap(a.x, W); a.y = wrap(a.y, H); });
+  }
+}
+
+// Initialise to full window size immediately
+resizeCanvas();
+
+// Re-run whenever the browser window is resized
+window.addEventListener('resize', resizeCanvas);
 
 // ── Constants ───────────────────────────────────────────────────
 const FPS                = 60;
