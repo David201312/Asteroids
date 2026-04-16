@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ASTEROIDS</title>
+  <style>
+    /* ── Reset & base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+    }
+
+    #gameCanvas {
+      display: block;
+      border: 1px solid rgba(255,255,255,0.15);
+      box-shadow: 0 0 40px rgba(255,255,255,0.06);
+    }
+
+    /* Overlay screens (start / game-over) */
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      text-align: center;
+      pointer-events: none;
+    }
+    #overlay h1 {
+      font-size: clamp(2rem, 6vw, 4.5rem);
+      letter-spacing: 0.3em;
+      text-shadow: 0 0 20px #fff, 0 0 60px rgba(255,255,255,0.4);
+      margin-bottom: 0.4em;
+    }
+    #overlay p {
+      font-size: clamp(0.75rem, 2vw, 1.1rem);
+      letter-spacing: 0.15em;
+      opacity: 0.75;
+      margin: 0.25em 0;
+    }
+    #overlay .blink {
+      animation: blink 1.1s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    #overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div id="overlay">
+  <h1>ASTEROIDS</h1>
+  <p>CONTROLS: ←/→ or A/D — ROTATE</p>
+  <p>↑ or W — THRUST &nbsp;|&nbsp; SPACE — FIRE</p>
+  <p style="margin-top:1.2em;" class="blink">PRESS SPACE OR ENTER TO START</p>
+</div>
+
+<script>
+/* ================================================================
+   ASTEROIDS — Atari (1979) faithful clone
+   Author: AI-generated for study purposes
+   ================================================================ */
+
+// ── Canvas & context setup ──────────────────────────────────────
+const canvas  = document.getElementById('gameCanvas');
+const ctx     = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+const W = 800, H = 600;
+canvas.width  = W;
+canvas.height = H;
+
+// ── Constants ───────────────────────────────────────────────────
+const FPS                = 60;
+const SHIP_SIZE          = 18;        // half-height of the ship
+const SHIP_THRUST        = 0.13;      // acceleration per frame
+const SHIP_FRICTION      = 0.985;     // velocity damping (inertia)
+const SHIP_TURN_SPEED    = 0.065;     // radians per frame
+const BULLET_SPEED       = 7;
+const BULLET_MAX_DIST    = 640;       // pixels before bullet expires
+const INVINCIBILITY_TIME = 180;       // frames of post-spawn immunity
+const FLASH_INTERVAL     = 6;        // frames between blink during immunity
+
+const ASTEROID_SIZES     = { large: 48, medium: 24, small: 12 };
+const ASTEROID_SCORE     = { large: 20, medium: 50, small: 100 };
+const ASTEROID_SPEED     = { large: 1.2, medium: 1.8, small: 2.6 };
+const INITIAL_ASTEROIDS  = 4;
+const LIVES_START        = 3;
+const EXTRA_LIFE_SCORE   = 10000;
+
+// ── Game state ───────────────────────────────────────────────────
+let ship, bullets, asteroids;
+let score, highScore, lives, level;
+let invincibleFrames, extraLifeThreshold;
+let gameState;         // 'idle' | 'playing' | 'dead' | 'gameover'
+let deathTimer;
+let keys;
+let frameCount;
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+/** Wrap a value around [0, max) */
+function wrap(val, max) {
+  return ((val % max) + max) % max;
+}
+
+/** Random float in [min, max) */
+function rand(min, max) {
+  return Math.random() * (max - min) + min;
+}
+
+/** Euclidean distance */
+function dist(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** Draw text centred at (x, y) */
+function drawText(text, x, y, size, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle   = '#fff';
+  ctx.font        = `${size}px 'Courier New', monospace`;
+  ctx.textAlign   = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowBlur  = 8;
+  ctx.shadowColor = '#fff';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+// ── Ship ─────────────────────────────────────────────────────────
+
+/**
+ * createShip — initialise the player ship at screen centre.
+ * The ship is defined as a triangle in local-space, rotated by ship.angle.
+ */
+function createShip() {
+  return {
+    x:      W / 2,
+    y:      H / 2,
+    vx:     0,
+    vy:     0,
+    angle:  -Math.PI / 2,   // pointing up
+    thrusting: false,
+    alive:  true,
+  };
+}
+
+/**
+ * updateShip — apply rotation, thrust, friction, screen-wrap.
+ * Physics: Newtonian inertia — velocity persists until damped by friction.
+ */
+function updateShip() {
+  if (!ship.alive) return;
+
+  // Rotation
+  if (keys['ArrowLeft']  || keys['KeyA']) ship.angle -= SHIP_TURN_SPEED;
+  if (keys['ArrowRight'] || keys['KeyD']) ship.angle += SHIP_TURN_SPEED;
+
+  // Thrust (gradual acceleration in the direction the ship faces)
+  ship.thrusting = keys['ArrowUp'] || keys['KeyW'];
+  if (ship.thrusting) {
+    ship.vx += SHIP_THRUST * Math.cos(ship.angle);
+    ship.vy += SHIP_THRUST * Math.sin(ship.angle);
+  }
+
+  // Friction / inertia damping
+  ship.vx *= SHIP_FRICTION;
+  ship.vy *= SHIP_FRICTION;
+
+  // Move
+  ship.x += ship.vx;
+  ship.y += ship.vy;
+
+  // Screen wrap
+  ship.x = wrap(ship.x, W);
+  ship.y = wrap(ship.y, H);
+}
+
+/**
+ * drawShip — render the classic triangular vector ship.
+ * Blinks when invincible to signal immunity window.
+ */
+function drawShip() {
+  if (!ship.alive) return;
+  if (invincibleFrames > 0 && Math.floor(invincibleFrames / FLASH_INTERVAL) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(ship.angle);
+
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth   = 1.5;
+  ctx.shadowBlur  = 8;
+  ctx.shadowColor = '#fff';
+  ctx.lineCap     = 'round';
+  ctx.lineJoin    = 'round';
+
+  // Main body: isoceles triangle
+  ctx.beginPath();
+  ctx.moveTo( SHIP_SIZE,       0);             // nose
+  ctx.lineTo(-SHIP_SIZE * 0.7,  SHIP_SIZE * 0.6); // left wing-tip
+  ctx.lineTo(-SHIP_SIZE * 0.35, 0);            // tail notch
+  ctx.lineTo(-SHIP_SIZE * 0.7, -SHIP_SIZE * 0.6); // right wing-tip
+  ctx.closePath();
+  ctx.stroke();
+
+  // Thruster flame (animated — visible only while thrusting)
+  if (ship.thrusting && frameCount % 3 !== 0) {
+    ctx.beginPath();
+    ctx.moveTo(-SHIP_SIZE * 0.35,  SHIP_SIZE * 0.25);
+    ctx.lineTo(-SHIP_SIZE * 0.9 - rand(0, SHIP_SIZE * 0.5), 0);
+    ctx.lineTo(-SHIP_SIZE * 0.35, -SHIP_SIZE * 0.25);
+    ctx.strokeStyle = '#fa0';
+    ctx.shadowColor = '#f80';
+    ctx.shadowBlur  = 12;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ── Bullets ──────────────────────────────────────────────────────
+
+/**
+ * fireBullet — spawn a bullet at the ship's nose, travelling
+ * at BULLET_SPEED in the direction the ship is facing.
+ */
+function fireBullet() {
+  if (!ship.alive) return;
+  bullets.push({
+    x:    ship.x + SHIP_SIZE * Math.cos(ship.angle),
+    y:    ship.y + SHIP_SIZE * Math.sin(ship.angle),
+    vx:   BULLET_SPEED * Math.cos(ship.angle) + ship.vx,
+    vy:   BULLET_SPEED * Math.sin(ship.angle) + ship.vy,
+    dist: 0,
+  });
+}
+
+/**
+ * updateBullets — move each bullet, wrap screen edges, expire by travel distance.
+ */
+function updateBullets() {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    b.x = wrap(b.x, W);
+    b.y = wrap(b.y, H);
+    b.dist += Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+    if (b.dist > BULLET_MAX_DIST) bullets.splice(i, 1);
+  }
+}
+
+/**
+ * drawBullets — tiny glowing dots for each active projectile.
+ */
+function drawBullets() {
+  ctx.fillStyle = '#fff';
+  ctx.shadowBlur  = 6;
+  ctx.shadowColor = '#aaf';
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+// ── Asteroids ────────────────────────────────────────────────────
+
+/**
+ * createAsteroid — build a single asteroid with a random jagged polygon shape.
+ * @param {number} x       - spawn X (pass null to pick a random safe location)
+ * @param {number} y       - spawn Y
+ * @param {string} type    - 'large' | 'medium' | 'small'
+ */
+function createAsteroid(x, y, type = 'large') {
+  const r = ASTEROID_SIZES[type];
+
+  // If no position given, place along the edge, away from the ship
+  if (x === null) {
+    const edge = Math.floor(Math.random() * 4);
+    if (edge === 0) { x = rand(0, W); y = 0;   }
+    else if (edge === 1) { x = W;    y = rand(0, H); }
+    else if (edge === 2) { x = rand(0, W); y = H;   }
+    else              { x = 0;    y = rand(0, H); }
+  }
+
+  // Random jagged silhouette (8-12 vertices)
+  const verts = Math.floor(rand(8, 13));
+  const shape = [];
+  for (let i = 0; i < verts; i++) {
+    const angle = (i / verts) * Math.PI * 2;
+    const jag   = rand(0.6, 1.0); // controlled jaggedness
+    shape.push({ angle, r: r * jag });
+  }
+
+  const speed = ASTEROID_SPEED[type];
+  const angle = rand(0, Math.PI * 2);
+
+  return {
+    x, y,
+    vx:    speed * Math.cos(angle) * rand(0.5, 1.5),
+    vy:    speed * Math.sin(angle) * rand(0.5, 1.5),
+    angle: rand(0, Math.PI * 2),
+    spin:  rand(-0.03, 0.03),
+    type,
+    r,
+    shape,
+  };
+}
+
+/**
+ * spawnAsteroids — populate the field for the current level.
+ * Extra asteroids are added each level.
+ */
+function spawnAsteroids() {
+  asteroids = [];
+  const count = INITIAL_ASTEROIDS + (level - 1);
+  for (let i = 0; i < count; i++) {
+    asteroids.push(createAsteroid(null, null, 'large'));
+  }
+}
+
+/**
+ * updateAsteroids — move, rotate, and wrap all asteroids.
+ */
+function updateAsteroids() {
+  for (const a of asteroids) {
+    a.x     += a.vx;
+    a.y     += a.vy;
+    a.angle += a.spin;
+    a.x      = wrap(a.x, W);
+    a.y      = wrap(a.y, H);
+  }
+}
+
+/**
+ * drawAsteroids — render each asteroid as a rotated jagged polygon.
+ * Style: classic vector white strokes.
+ */
+function drawAsteroids() {
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth   = 1.5;
+  ctx.shadowBlur  = 6;
+  ctx.shadowColor = 'rgba(255,255,255,0.5)';
+  ctx.lineCap     = 'round';
+  ctx.lineJoin    = 'round';
+
+  for (const a of asteroids) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.angle);
+    ctx.beginPath();
+    for (let i = 0; i < a.shape.length; i++) {
+      const v  = a.shape[i];
+      const px = v.r * Math.cos(v.angle);
+      const py = v.r * Math.sin(v.angle);
+      if (i === 0) ctx.moveTo(px, py);
+      else         ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.shadowBlur = 0;
+}
+
+// ── Particle / Debris effects ─────────────────────────────────────
+
+let particles = [];
+
+function spawnParticles(x, y, count, colour) {
+  for (let i = 0; i < count; i++) {
+    const angle = rand(0, Math.PI * 2);
+    const speed = rand(1, 5);
+    particles.push({
+      x, y,
+      vx:    Math.cos(angle) * speed,
+      vy:    Math.sin(angle) * speed,
+      life:  rand(20, 50),
+      maxLife: 50,
+      colour,
+    });
+  }
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle   = p.colour;
+    ctx.shadowBlur  = 4;
+    ctx.shadowColor = p.colour;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Collision Detection ──────────────────────────────────────────
+
+/**
+ * checkCollisions — circle-based collision detection for:
+ *   1. Bullets  → Asteroids
+ *   2. Ship     → Asteroids
+ *
+ * When an asteroid is hit it splits into 2 smaller ones (or is destroyed).
+ */
+function checkCollisions() {
+  // 1. Bullet vs Asteroid
+  for (let bi = bullets.length - 1; bi >= 0; bi--) {
+    for (let ai = asteroids.length - 1; ai >= 0; ai--) {
+      const b = bullets[bi];
+      const a = asteroids[ai];
+      if (dist(b, a) < a.r) {
+        // Destroy bullet
+        bullets.splice(bi, 1);
+        // Score
+        score += ASTEROID_SCORE[a.type];
+        // Extra life milestone
+        if (score >= extraLifeThreshold) {
+          lives++;
+          extraLifeThreshold += EXTRA_LIFE_SCORE;
+        }
+        // Spawn particles
+        spawnParticles(a.x, a.y, a.type === 'large' ? 12 : a.type === 'medium' ? 8 : 5, '#fff');
+        // Fragment: large → 2 medium, medium → 2 small, small → destroyed
+        if (a.type === 'large') {
+          asteroids.push(createAsteroid(a.x, a.y, 'medium'));
+          asteroids.push(createAsteroid(a.x, a.y, 'medium'));
+        } else if (a.type === 'medium') {
+          asteroids.push(createAsteroid(a.x, a.y, 'small'));
+          asteroids.push(createAsteroid(a.x, a.y, 'small'));
+        }
+        asteroids.splice(ai, 1);
+        break; // one bullet hits one asteroid
+      }
+    }
+  }
+
+  // 2. Ship vs Asteroid
+  if (ship.alive && invincibleFrames <= 0) {
+    for (const a of asteroids) {
+      if (dist(ship, a) < a.r + SHIP_SIZE * 0.6) {
+        killShip();
+        break;
+      }
+    }
+  }
+}
+
+// ── Ship death & respawn ─────────────────────────────────────────
+
+function killShip() {
+  ship.alive = false;
+  lives--;
+  spawnParticles(ship.x, ship.y, 20, '#f84');
+  gameState  = 'dead';
+  deathTimer = 120; // frames to wait before respawn / game-over check
+}
+
+function respawnShip() {
+  ship             = createShip();
+  invincibleFrames = INVINCIBILITY_TIME;
+}
+
+// ── HUD (Heads-Up Display) ───────────────────────────────────────
+
+/**
+ * drawHUD — render score, high-score, and lives indicators.
+ * Drawn in vector style using Courier New to match the arcade feel.
+ */
+function drawHUD() {
+  ctx.shadowBlur  = 6;
+  ctx.shadowColor = '#fff';
+
+  // Score (top-left)
+  drawText(String(score).padStart(6, '0'), 70, 28, 22);
+
+  // High Score label + value (top-centre)
+  drawText('HI', W / 2, 18, 11, 0.5);
+  drawText(String(highScore).padStart(6, '0'), W / 2, 34, 22);
+
+  // Lives (top-right) — draw mini ship icons
+  for (let i = 0; i < lives; i++) {
+    drawMiniShip(W - 24 - i * 26, 26);
+  }
+
+  // Level indicator (bottom-centre)
+  drawText(`LEVEL ${level}`, W / 2, H - 16, 12, 0.4);
+
+  ctx.shadowBlur = 0;
+}
+
+function drawMiniShip(x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-Math.PI / 2);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth   = 1.5;
+  const s = 8;
+  ctx.beginPath();
+  ctx.moveTo( s,       0);
+  ctx.lineTo(-s * 0.7,  s * 0.6);
+  ctx.lineTo(-s * 0.35, 0);
+  ctx.lineTo(-s * 0.7, -s * 0.6);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── Game State Management ────────────────────────────────────────
+
+function startGame() {
+  score              = 0;
+  level              = 1;
+  lives              = LIVES_START;
+  extraLifeThreshold = EXTRA_LIFE_SCORE;
+  bullets            = [];
+  particles          = [];
+  ship               = createShip();
+  invincibleFrames   = INVINCIBILITY_TIME;
+  spawnAsteroids();
+  gameState          = 'playing';
+  overlay.classList.add('hidden');
+}
+
+function nextLevel() {
+  level++;
+  bullets    = [];
+  particles  = [];
+  ship       = createShip();
+  invincibleFrames = INVINCIBILITY_TIME;
+  spawnAsteroids();
+  gameState  = 'playing';
+}
+
+function showGameOver() {
+  if (score > highScore) highScore = score;
+  gameState = 'gameover';
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h1>GAME OVER</h1>
+    <p>SCORE &nbsp;&nbsp;${score}</p>
+    <p>HI-SCORE &nbsp;${highScore}</p>
+    <p style="margin-top:1.2em;" class="blink">PRESS SPACE OR ENTER TO PLAY AGAIN</p>
+  `;
+}
+
+// ── Input Handling ───────────────────────────────────────────────
+
+keys = {};
+let lastFire   = 0;
+const FIRE_RATE = 8; // frames between bullets
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (gameState === 'idle' || gameState === 'gameover') {
+      startGame();
+    }
+  }
+
+  // Fire rate limiter
+  if (e.code === 'Space' && gameState === 'playing') {
+    if (frameCount - lastFire >= FIRE_RATE) {
+      fireBullet();
+      lastFire = frameCount;
+    }
+  }
+});
+
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ── Main Game Loop ───────────────────────────────────────────────
+
+/**
+ * gameLoop — the central update/draw cycle, called at ~60 fps via requestAnimationFrame.
+ * Phases: clear → update → draw → HUD → schedule next frame.
+ */
+function gameLoop() {
+  frameCount++;
+
+  // ── Clear ──
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  if (gameState === 'playing' || gameState === 'dead') {
+
+    // ── Update ──
+    if (gameState === 'playing') {
+      updateShip();
+      updateBullets();
+      updateAsteroids();
+      checkCollisions();
+      if (invincibleFrames > 0) invincibleFrames--;
+
+      // Auto-fire while Space held (with rate limit)
+      if (keys['Space'] && frameCount - lastFire >= FIRE_RATE) {
+        fireBullet();
+        lastFire = frameCount;
+      }
+
+      // Level clear: all asteroids destroyed
+      if (asteroids.length === 0) nextLevel();
+    }
+
+    // Death countdown → respawn or game-over
+    if (gameState === 'dead') {
+      deathTimer--;
+      if (deathTimer <= 0) {
+        if (lives > 0) respawnShip(), gameState = 'playing';
+        else showGameOver();
+      }
+    }
+
+    updateParticles();
+
+    // ── Draw ──
+    drawAsteroids();
+    drawBullets();
+    drawShip();
+    drawParticles();
+    drawHUD();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ── Bootstrap ────────────────────────────────────────────────────
+
+highScore  = 0;
+frameCount = 0;
+gameState  = 'idle';
+overlay.classList.remove('hidden');
+
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
