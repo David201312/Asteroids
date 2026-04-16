@@ -92,8 +92,11 @@ function resizeCanvas() {
   }
 }
 
-// Initialise to full window size immediately
-resizeCanvas();
+// Initialise canvas pixel dimensions immediately.
+// We cannot call resizeCanvas() here because ship/bullets/asteroids
+// are declared further down with `let` (temporal dead zone).
+canvas.width  = W;
+canvas.height = H;
 
 // Re-run whenever the browser window is resized
 window.addEventListener('resize', resizeCanvas);
