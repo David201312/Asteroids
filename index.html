@@ -642,6 +642,25 @@ function showMenu() {
 // ── Menu Rendering ───────────────────────────────────────────────
 
 /**
+ * roundedRect — polyfill for ctx.roundRect(), which is only available
+ * in Chrome 99+ / Edge 99+. Draws a rounded rectangle path so the
+ * menu buttons render correctly on all browser versions.
+ */
+function roundedRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y,     x + w, y + r,     r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x,     y + h, x,     y + h - r, r);
+  ctx.lineTo(x,     y + r);
+  ctx.arcTo(x,     y,     x + r, y,         r);
+  ctx.closePath();
+}
+
+/**
  * buildMenuRects — compute the bounding boxes for the three difficulty
  * buttons so hit-testing (mouse clicks) can reuse the same geometry.
  * Returns an array of { x, y, w, h, key } objects.
@@ -692,8 +711,7 @@ function drawMenu() {
     // Button background (subtle highlight on hover)
     ctx.globalAlpha = hovered ? 0.18 : 0.07;
     ctx.fillStyle   = colour;
-    ctx.beginPath();
-    ctx.roundRect(r.x, r.y, r.w, r.h, 6);
+    roundedRect(r.x, r.y, r.w, r.h, 6);
     ctx.fill();
 
     // Button border
@@ -702,8 +720,7 @@ function drawMenu() {
     ctx.lineWidth   = hovered ? 2 : 1.2;
     ctx.shadowBlur  = hovered ? 16 : 4;
     ctx.shadowColor = colour;
-    ctx.beginPath();
-    ctx.roundRect(r.x, r.y, r.w, r.h, 6);
+    roundedRect(r.x, r.y, r.w, r.h, 6);
     ctx.stroke();
 
     // Label  (e.g. "[1] FACIL")
@@ -806,10 +823,6 @@ canvas.addEventListener('mouseleave', () => { menuHoverIndex = -1; });
 
 // ── Main Game Loop ───────────────────────────────────────────────
 
-/**
- * gameLoop — the central update/draw cycle, called at ~60 fps via requestAnimationFrame.
- * Phases: clear → update → draw → HUD → schedule next frame.
- */
 /**
  * gameLoop — central update/draw cycle (~60 fps via requestAnimationFrame).
  *
